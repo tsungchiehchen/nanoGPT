@@ -41,8 +41,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        self.wind = config.wind # Question 3
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.wind = config.wind  # window size for sliding window attention
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
@@ -59,39 +58,21 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         if self.wind:
-            outputs = torch.zeros_like(q) # Initialize the output tensor
-            for i in range(0, T, self.wind):
-                k_segment = k[:,:,max(0, i-self.wind+1):min(i+1, T),:] # Key segment
-                q_segment = q[:,:, i:min(i+1, T),:] # Query segment
-                v_segment = v[:,:,max(0, i-self.wind+1):min(i+1, T),:] # Value segment
-                
-                # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) → (B, nh, T, T)
-                if self.flash:
-                    # efficient attention using Flash Attention CUDA kernels
-                    outputs[:,:, i:min(i+1, T),:] = torch.nn.functional.scaled_dot_product_attention(q_segment, k_segment, v_segment, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-                else:
-                    # manual implementation of attention
-                    att = (q_segment @ k_segment.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-                    att = att.masked_fill(self.bias[:, :,:T,:T] == 0, float('-inf'))
-                    att = F.softmax(att, dim=-1)
-                    att = self.attn_dropout(att)
-                    outputs[:,:,i:min(i+1, T),:] = att @ v_segment # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-            y = outputs.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+            # Create a sliding window mask for the attention scores
+            sliding_window_mask = torch.ones(T, T, device=x.device).tril().triu(-self.wind + 1)
+            sliding_window_mask = sliding_window_mask.view(1, 1, T, T)
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(sliding_window_mask == 0, float('-inf'))
         else:
-            # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-            if self.flash:
-                # efficient attention using Flash Attention CUDA kernels
-                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-            else:
-                # manual implementation of attention
-                att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-                att = F.softmax(att, dim=-1)
-                att = self.attn_dropout(att)
-                y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-            y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-
+            # Full attention without window
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        
         # output projection
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
         return y
 
