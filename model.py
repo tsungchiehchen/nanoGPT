@@ -41,6 +41,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        self.wind = config.wind
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -58,38 +59,34 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        if self.wind:
-            if self.flash:
-                # Create mask for sliding window attention
-                mask = torch.zeros((B, self.n_head, T, T)).to(x.device)
-                for i in range(T):
-                    mask[:, :, i, max(0, i-self.wind):i] = 1
-                print(mask[0, 0])
+        if self.wind is not None:
+            # create sliding window mask
+            mask = torch.tril(torch.ones(T, T, device=x.device), diagonal=0) - torch.tril(torch.ones(T, T, device=x.device), diagonal=-self.wind)
+            mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
+        else:
+            mask = None
 
-                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-            else:
+        # conditional attention mechanism based on the value of wind
+        if self.flash:
+            # efficient attention using Flash Attention CUDA kernels
+            print("IN self.flash using attn_mask")
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            if self.wind is not None:
+                # manual implementation of attention with sliding window
                 att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-                # Create mask for sliding window attention
-                mask = torch.zeros(att)
-                for i in range(T):
-                    mask[:, :, i, max(0, i-self.wind):i] = 1
-                print(mask[0, 0])
                 att = att.masked_fill(mask == 0, float('-inf'))
                 att = F.softmax(att, dim=-1)
                 att = self.attn_dropout(att)
-                y = att @ v # (B, nh, T, T) x (B, nh, hs, T) -> (B, nh, T, hs)
-        else:
-            # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-            if self.flash:
-                # efficient attention using Flash Attention CUDA kernels
-                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+                y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
             else:
-                # manual implementation of attention
+                # original manual implementation of causal attention
                 att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
                 att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
                 att = F.softmax(att, dim=-1)
                 att = self.attn_dropout(att)
                 y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
