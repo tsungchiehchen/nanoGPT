@@ -27,66 +27,55 @@ class LayerNorm(nn.Module):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 class CausalSelfAttention(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
+        self.wind = config.wind  # Sliding window size
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        self.wind = config.wind  # Question 3
+        self.n_embd = config.n_embd // config.n_head  # Dimension of model / number of heads
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-
-        # Preparing the full causal mask (only if we're not using the sliding window)
-        if self.wind is None:
-            max_length = config.block_size
-            full_bias = torch.tril(torch.ones((max_length, max_length), device='cuda'))
-            self.register_buffer('bias', full_bias.view(1, 1, max_length, max_length))
+        
+        # Causal mask to ensure that attention is only applied to the left in the input sequence
+        self.register_buffer("bias", None)  # No longer pre-computed full causal mask
 
     def forward(self, x):
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
-
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
+        
+        # Linear projections in batch from d_model => h * d_k, or split into (q, k, v)
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        q = q.view(B, T, self.n_head, self.n_embd).transpose(1, 2)  # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, self.n_embd).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, self.n_embd).transpose(1, 2)  # (B, nh, T, hs)
+        
+        # Compute the dot products of the query with the key (scaled by sqrt of dimension)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.n_embd)
+        
+        if self.wind is not None:
+            # We create a sliding window mask that only allows attention to the last 'wind' positions
+            window_mask = torch.full((T, T), float('-inf'), device=x.device, dtype=scores.dtype)
+            window_mask = torch.triu(window_mask, diagonal=-self.wind + 1)
+            scores = scores + window_mask.unsqueeze(0).unsqueeze(0)  # Apply the window mask
+            
         else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-
-            # Create causal mask with padding for sliding window
-            causal_mask = torch.tril(torch.ones((T, T), device=x.device))
-            padding_mask = torch.ones((B, 1, T), device=x.device) * float('-inf')  # mask padding with -inf
-            causal_mask = torch.cat((padding_mask, causal_mask[:, 1:]), dim=-1)  # combine causal and padding masks
-
-            # Apply sliding window mask (shift causal mask by window size)
-            if self.wind is not None:
-                window_mask = torch.tril(torch.ones((T, T), device=x.device))[:, -self.wind:]
-                window_mask = window_mask.masked_fill(window_mask == 1, float('-inf'))
-                causal_mask += window_mask.unsqueeze(0)
-
-            # Apply causal and window mask
-            att = att.masked_fill(causal_mask == 0, float('-inf'))  # Apply causal and window mask
-
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v
-
+            # Standard full causal mask
+            scores = scores + torch.tril(torch.ones((T, T), device=x.device, dtype=scores.dtype)).view(1, 1, T, T) * 0 + \
+                     torch.triu(torch.ones((T, T), device=x.device, dtype=scores.dtype) * float('-inf'), diagonal=1).view(1, 1, T, T)
+        
+        # Apply the softmax to convert scores to probabilities
+        attn = F.softmax(scores, dim=-1)
+        attn = self.attn_dropout(attn)
+        
+        # Multiply the probabilities by the values
+        y = torch.matmul(attn, v)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
+        
+        # Project back to the residual size and apply dropout
         y = self.resid_dropout(self.c_proj(y))
+        
         return y
 
 class MLP(nn.Module):
