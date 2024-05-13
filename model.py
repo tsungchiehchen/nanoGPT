@@ -61,15 +61,15 @@ class CausalSelfAttention(nn.Module):
 
         if self.wind is not None:
             # create sliding window mask
-            mask = torch.tril(torch.ones(T, T, device=x.device), diagonal=0) - torch.tril(torch.ones(T, T, device=x.device), diagonal=-self.wind)
-            mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
+            mask = torch.ones(T, T, device=x.device).tril(diagonal=0).triu(diagonal=-self.wind)
+            mask = mask.unsqueeze(0).unsqueeze(0)  # Shape (1, 1, T, T)
+            mask = mask.expand(B, self.n_head, -1, -1)  # Shape (B, nh, T, T)
         else:
             mask = None
 
         # conditional attention mechanism based on the value of wind
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            print("IN self.flash using attn_mask")
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             if self.wind is not None:
