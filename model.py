@@ -50,6 +50,20 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
+        # Register a buffer for the causal mask, updated to handle the sliding window
+        if self.wind is not None:
+            self.register_buffer("bias", self.create_sliding_window_mask(config.block_size, self.wind))
+        else:
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+    
+    def create_sliding_window_mask(self, block_size, wind):
+        """Create a sliding window mask for attention."""
+        mask = torch.full((block_size, block_size), float('-inf'), device='cuda')
+        mask = torch.tril(mask, 0)
+        mask = torch.triu(mask, -wind)
+        return mask.view(1, 1, block_size, block_size)
+
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -58,19 +72,9 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
-        # Check if wind is set, otherwise default to full sequence attention
-        if self.wind is not None:
-            sliding_window_mask = torch.full((T, T), float('-inf'), device=x.device)
-            sliding_window_mask = torch.tril(sliding_window_mask, 0)
-            sliding_window_mask = torch.triu(sliding_window_mask, -self.wind)
-            sliding_window_mask = sliding_window_mask.unsqueeze(0).unsqueeze(0)  # Apply mask to all batches and heads
-        else:
-            # If wind is not set, use a mask that allows full sequence attention
-            sliding_window_mask = torch.zeros((1, 1, T, T), device=x.device)
-
-        # Apply the sliding window mask
+        # Apply the sliding window mask to the attention scores
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att += sliding_window_mask  # Apply mask to all batches and heads
+        att += self.bias[:, :, :T, :T]  # Adjust the mask size if needed
 
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
