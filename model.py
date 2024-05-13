@@ -31,7 +31,6 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        self.wind = config.wind
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
@@ -42,41 +41,45 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.wind = config.wind  # Question 3
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
+
+        # Preparing the full causal mask (only if we're not using the sliding window)
+        if self.wind is None:
+            max_length = config.block_size
+            full_bias = torch.tril(torch.ones((max_length, max_length), device='cuda'))
+            self.register_buffer('bias', full_bias.view(1, 1, max_length, max_length))
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        # Scaled dot product attention
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
 
         if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            # create sliding window mask
-            bias = torch.tril(torch.ones(T, T), diagonal=0).to(x.device)
-            bias = bias - torch.tril(torch.ones(T, T), diagonal=-self.wind).to(x.device)
-            self.register_buffer("sliding_bias", bias.view(1, 1, T, T))
-            att = att.masked_fill(self.sliding_bias[:,:,:T,:T] == 0, float('-inf'))
+            if self.wind is not None:
+                # Create the sliding window mask dynamically
+                sliding_mask = torch.tril(torch.ones((T, T), device=x.device), 0)
+                sliding_mask = sliding_mask - torch.tril(torch.ones((T, T), device=x.device), -self.wind)
+                sliding_mask = sliding_mask.masked_fill(sliding_mask == 1, float('-inf'))
+                att = att + sliding_mask.unsqueeze(0).unsqueeze(0)
+            else:
+                # Use the full causal mask if wind is None
+                att = att + self.bias[:, :, :T, :T]
+
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = att @ v
 
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-
-        # output projection
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
         return y
 
