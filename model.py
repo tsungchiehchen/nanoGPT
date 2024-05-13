@@ -51,29 +51,35 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer('bias', full_bias.view(1, 1, max_length, max_length))
 
     def forward(self, x):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
-        # Scaled dot product attention
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
+            # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
+            # manual implementation of attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+
+            # Create causal mask with padding for sliding window
+            causal_mask = torch.tril(torch.ones((T, T), device=x.device))
+            padding_mask = torch.ones((B, 1, T), device=x.device) * float('-inf')  # mask padding with -inf
+            causal_mask = torch.cat((padding_mask, causal_mask[:, 1:]), dim=-1)  # combine causal and padding masks
+
+            # Apply sliding window mask (shift causal mask by window size)
             if self.wind is not None:
-                # Create the sliding window mask dynamically
-                sliding_mask = torch.tril(torch.ones((T, T), device=x.device), 0)
-                sliding_mask = sliding_mask - torch.tril(torch.ones((T, T), device=x.device), -self.wind)
-                sliding_mask = sliding_mask.masked_fill(sliding_mask == 1, float('-inf'))
-                att = att + sliding_mask.unsqueeze(0).unsqueeze(0)
-            else:
-                # Use the full causal mask if wind is None
-                att = att + self.bias[:, :, :T, :T]
+                window_mask = torch.tril(torch.ones((T, T), device=x.device))[:, -self.wind:]
+                window_mask = window_mask.masked_fill(window_mask == 1, float('-inf'))
+                causal_mask += window_mask.unsqueeze(0)
+
+            # Apply causal and window mask
+            att = att.masked_fill(causal_mask == 0, float('-inf'))  # Apply causal and window mask
 
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
