@@ -41,38 +41,53 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        self.wind = config.wind  # window size for sliding window attention
+        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
+        
+        # Determine the size of the window for attention
+        self.wind = config.wind
+        if self.wind is None:
+            # Default to full sequence attention if wind is not set
+            self.register_buffer("bias", None)
+        else:
+            # Initialize the sliding window mask for causal attention
+            self.register_buffer("bias", self.create_sliding_window_mask(config.block_size, self.wind))
+
+    def create_sliding_window_mask(self, block_size, wind):
+        # Create a sliding window attention mask of shape (1, 1, block_size, block_size)
+        mask = torch.full((block_size, block_size), float('-inf'))
+        for i in range(block_size):
+            if i < wind:
+                mask[i, :i + 1] = 0
+            else:
+                mask[i, i - wind + 1: i + 1] = 0
+        mask = mask.view(1, 1, block_size, block_size)
+        return mask
 
     def forward(self, x):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
-        if self.wind:
-            # Create a sliding window mask for the attention scores
-            sliding_window_mask = torch.ones(T, T, device=x.device).tril().triu(-self.wind + 1)
-            sliding_window_mask = sliding_window_mask.view(1, 1, T, T)
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(sliding_window_mask == 0, float('-inf'))
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        if self.flash:
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
-            # Full attention without window
+            # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        
+            if self.wind is not None:
+                att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
+
         # output projection
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
         return y
 
