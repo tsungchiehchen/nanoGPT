@@ -59,7 +59,7 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
-        if self.wind:
+        if self.wind != 256:
             if self.flash:
                 # efficient attention using Flash Attention CUDA kernels
                 mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind+1).to(x.device)
@@ -102,16 +102,24 @@ class CausalSelfAttention(nn.Module):
 
 class MLP(nn.Module):
 
-    if config.threeLayer:
-        def __init__(self, config):
+    def __init__(self, config):
+        self.threeLayer = config.threeLayer
+        if self.threeLayer:
             super().__init__()
             self.c_fc1    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
             self.gelu    = nn.GELU()
             self.c_fc2    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
             self.c_fc3    = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
             self.dropout = nn.Dropout(config.dropout)
+        else:
+            super().__init__()
+            self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+            self.gelu    = nn.GELU()
+            self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+            self.dropout = nn.Dropout(config.dropout)
 
-        def forward(self, x):
+    def forward(self, x):
+        if self.threeLayer:
             x1 = self.c_fc1(x)
             x1 = self.gelu(x1)
             x2 = self.c_fc2(x)
@@ -119,15 +127,7 @@ class MLP(nn.Module):
             x = self.c_fc3(x)
             x = self.dropout(x)
             return x
-    else:
-        def __init__(self, config):
-            super().__init__()
-            self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-            self.gelu    = nn.GELU()
-            self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-            self.dropout = nn.Dropout(config.dropout)
-
-        def forward(self, x):
+        else:
             x = self.c_fc(x)
             x = self.gelu(x)
             x = self.c_proj(x)
@@ -158,6 +158,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     wind: int = None # Question 3
+    threeLayer: bool = False # Question 4
 
 class GPT(nn.Module):
 
