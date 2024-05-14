@@ -60,8 +60,6 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         if self.wind:
-            if B == 1:
-                print("window size = ", self.wind)
             if self.flash:
                 # efficient attention using Flash Attention CUDA kernels
                 mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind+1).to(x.device)
