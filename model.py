@@ -78,6 +78,10 @@ class CausalSelfAttention(nn.Module):
                 for i in range(T):
                     mask[:, :, i, max(0, i-self.wind):i] = 1
                 att = att.masked_fill(mask == 0, float('-inf'))
+                att = F.softmax(att, dim=-1)
+                att = self.attn_dropout(att)
+                y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         else:
             # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
             if self.flash:
@@ -87,11 +91,10 @@ class CausalSelfAttention(nn.Module):
                 # manual implementation of attention
                 att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
                 att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+                att = F.softmax(att, dim=-1)
+                att = self.attn_dropout(att)
+                y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
