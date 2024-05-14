@@ -43,7 +43,7 @@ class CausalSelfAttention(nn.Module):
         self.dropout = config.dropout
         self.wind = config.wind
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = True
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -60,7 +60,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         if self.wind != 256:
-            if self.flash:
+            if False:
                 # efficient attention using Flash Attention CUDA kernels
                 mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind+1).to(x.device)
 
@@ -74,11 +74,16 @@ class CausalSelfAttention(nn.Module):
                 # manual implementation of attention with sliding window
                 att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
                 # create sliding window mask
-                mask = torch.zeros(att)
-                for i in range(T):
-                    mask[:, :, i, max(0, i-self.wind):i] = 1
+                mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind+1).to(x.device)
+
+                # Expand to full mask with required dimensions
+                mask = mask.unsqueeze(0).unsqueeze(0)
+                mask = mask.expand(B, self.n_head, -1, -1)
+                mask = mask.bool()
+
                 att = att.masked_fill(mask == 0, float('-inf'))
                 att = F.softmax(att, dim=-1)
+                print("ATT: ", att[0, 0])
                 att = self.attn_dropout(att)
                 y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
             y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
