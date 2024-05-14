@@ -102,7 +102,8 @@ class CausalSelfAttention(nn.Module):
 
 class MLP(nn.Module):
 
-    def __init__(self, config):
+    if config.threeLayer:
+        def __init__(self, config):
         super().__init__()
         self.c_fc1    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
@@ -110,14 +111,28 @@ class MLP(nn.Module):
         self.c_fc3    = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
-        x1 = self.c_fc1(x)
-        x1 = self.gelu(x1)
-        x2 = self.c_fc2(x)
-        x = x1 * x2  # element-wise product
-        x = self.c_fc3(x)
-        x = self.dropout(x)
-        return x
+        def forward(self, x):
+            x1 = self.c_fc1(x)
+            x1 = self.gelu(x1)
+            x2 = self.c_fc2(x)
+            x = x1 * x2  # element-wise product
+            x = self.c_fc3(x)
+            x = self.dropout(x)
+            return x
+    else:
+        def __init__(self, config):
+            super().__init__()
+            self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+            self.gelu    = nn.GELU()
+            self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+            self.dropout = nn.Dropout(config.dropout)
+
+        def forward(self, x):
+            x = self.c_fc(x)
+            x = self.gelu(x)
+            x = self.c_proj(x)
+            x = self.dropout(x)
+            return x
 
 class Block(nn.Module):
 
