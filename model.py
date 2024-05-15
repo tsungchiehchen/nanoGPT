@@ -60,7 +60,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         if self.wind != 256:
-            if False:
+            if self.flash:
                 # efficient attention using Flash Attention CUDA kernels
                 mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind+1).to(x.device)
 
@@ -83,7 +83,6 @@ class CausalSelfAttention(nn.Module):
 
                 att = att.masked_fill(mask == 0, float('-inf'))
                 att = F.softmax(att, dim=-1)
-                print("ATT: ", att[0, 0])
                 att = self.attn_dropout(att)
                 y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
             y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
