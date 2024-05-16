@@ -256,6 +256,7 @@ raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 
 # Initialize lists to store the training progress
+import matplotlib.pyplot as plt
 iteration_numbers = []
 train_losses = []
 val_losses = []
