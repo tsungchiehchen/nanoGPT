@@ -62,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         if self.wind != 256:
             if self.flash:
                 # efficient attention using Flash Attention CUDA kernels
-                mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind+1).to(x.device)
+                mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind).to(x.device)
 
                 # Expand to full mask with required dimensions
                 mask = mask.unsqueeze(0).unsqueeze(0)
@@ -74,7 +74,7 @@ class CausalSelfAttention(nn.Module):
                 # manual implementation of attention with sliding window
                 att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
                 # create sliding window mask
-                mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind+1).to(x.device)
+                mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind).to(x.device)
 
                 # Expand to full mask with required dimensions
                 mask = mask.unsqueeze(0).unsqueeze(0)
