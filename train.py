@@ -254,6 +254,12 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+
+# Initialize lists to store the training progress
+iteration_numbers = []
+train_losses = []
+val_losses = []
+
 while True:
 
     # determine and set the learning rate for this iteration
@@ -265,6 +271,12 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        
+        # Append values to lists for plotting later
+        iteration_numbers.append(iter_num)
+        train_losses.append(losses['train'])
+        val_losses.append(losses['val'])
+
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -333,6 +345,17 @@ while True:
     # termination conditions
     if iter_num > max_iters:
         break
+
+# Plotting the training and validation loss
+plt.figure(figsize=(10, 5))
+plt.plot(iteration_numbers, train_losses, label='Training Loss')
+plt.plot(iteration_numbers, val_losses, label='Validation Loss')
+plt.xlabel('Iteration Number')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss Over Iterations')
+plt.legend()
+plt.grid(True)
+plt.show()
 
 if ddp:
     destroy_process_group()
