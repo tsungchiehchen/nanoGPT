@@ -54,6 +54,8 @@ n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
+key_dim = 64 # Question 2
+query_dim = 64 # Question 2
 wind = 256 # Question 3
 threeLayer = False # Question 4
 abs = False # Question 7
@@ -148,7 +150,7 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout, wind=wind, threeLayer=threeLayer, abs=abs) # start with model_args from command line   # Question 2, 3, 4, 7
+                  bias=bias, vocab_size=None, dropout=dropout, key_dim=key_dim, query_dim=query_dim, wind=wind, threeLayer=threeLayer, abs=abs) # start with model_args from command line   # Question 2, 3, 4, 7
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")

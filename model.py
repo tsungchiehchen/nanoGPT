@@ -49,8 +49,10 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        self.wind = config.wind
-        self.abs = config.abs
+        self.key_dim = config.key_dim if config.key_dim != 64 else config.n_embd // config.n_head # Question 2
+        self.query_dim = config.query_dim if config.query_dim != 64 else config.n_embd // config.n_head # Question 2
+        self.wind = config.wind # Question 3
+        self.abs = config.abs # Question 7
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash or self.abs:
@@ -62,11 +64,18 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        if self.key_dim == 64 and self.query_dim == 64:
+            # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+            k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+            q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+            v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        else:
+            # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+            q, k, v  = self.c_attn(x).split([self.query_dim, self.key_dim, self.n_embd], dim=2)
+            k = k.view(B, T, self.n_head, self.key_dim // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            q = q.view(B, T, self.n_head, self.query_dim // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         if self.wind != 256:
             if self.flash and not self.abs:
@@ -99,7 +108,11 @@ class CausalSelfAttention(nn.Module):
                 
                 att = self.attn_dropout(att)
                 y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-            y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+            
+            if self.key_dim == 64 and self.query_dim == 64:
+                y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+            else:
+                y = y.transpose(1, 2).contiguous().view(B, T, self.key_dim * self.n_head) # re-assemble all head outputs side by side
         else:
             # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
             if self.flash and not self.abs:
@@ -112,7 +125,11 @@ class CausalSelfAttention(nn.Module):
                 att = F.softmax(att, dim=-1)
                 att = self.attn_dropout(att)
                 y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-            y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+            
+            if self.key_dim == 64 and self.query_dim == 64:
+                y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+            else:
+                y = y.transpose(1, 2).contiguous().view(B, T, self.key_dim * self.n_head) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
@@ -175,6 +192,8 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    key_dim: int = 64 # Question 2
+    query_dim: int = 64 # Question 2
     wind: int = None # Question 3
     threeLayer: bool = False # Question 4
     abs: bool = False # Question 7
