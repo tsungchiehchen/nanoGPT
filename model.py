@@ -26,6 +26,14 @@ class LayerNorm(nn.Module):
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
+
+def custom_softmax(x, dim):
+    epsilon = 1e-12  # Small value to prevent division by zero
+    x_abs = torch.abs(x)
+    sum_x_abs = torch.sum(x_abs, dim=dim, keepdim=True)
+    return x_abs / (sum_x_abs + epsilon)
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -42,9 +50,10 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         self.wind = config.wind
+        self.abs = config.abs
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
+        if not self.flash or self.abs:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
@@ -60,7 +69,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         if self.wind != 256:
-            if self.flash:
+            if self.flash and not self.abs:
                 # efficient attention using Flash Attention CUDA kernels
                 mask = torch.ones(T, T).tril(diagonal=0).triu(diagonal=-self.wind).to(x.device)
 
@@ -80,15 +89,20 @@ class CausalSelfAttention(nn.Module):
                 mask = mask.unsqueeze(0).unsqueeze(0)
                 mask = mask.expand(B, self.n_head, -1, -1)
                 mask = mask.bool()
-
-                att = att.masked_fill(mask == 0, float('-inf'))
-                att = F.softmax(att, dim=-1)
+                
+                if self.abs:
+                    att = att.masked_fill(mask == 0, 0)
+                    att = custom_softmax(att, dim=-1)
+                else:
+                    att = att.masked_fill(mask == 0, float('-inf'))
+                    att = F.softmax(att, dim=-1)
+                
                 att = self.attn_dropout(att)
                 y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
             y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         else:
             # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-            if self.flash:
+            if self.flash and not self.abs:
                 # efficient attention using Flash Attention CUDA kernels
                 y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
             else:
@@ -163,6 +177,7 @@ class GPTConfig:
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     wind: int = None # Question 3
     threeLayer: bool = False # Question 4
+    abs: bool = False # Question 7
 
 class GPT(nn.Module):
 
