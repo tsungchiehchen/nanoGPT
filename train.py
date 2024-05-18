@@ -350,6 +350,10 @@ while True:
     if iter_num > max_iters:
         break
 
+# print out the final training and validation loss
+print(f"Train loss: {train_losses}")
+print(f"Val loss: {val_losses}")
+
 # Plotting the training and validation loss
 plt.figure(figsize=(10, 5))
 plt.plot(iteration_numbers, train_losses, label='Training Loss')
