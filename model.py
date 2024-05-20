@@ -275,7 +275,7 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
         if self.n_regist > 0:
-            register_tokens = torch.arange(self.n_regist, device=device) + idx.max() + 1
+            register_tokens = (torch.arange(self.n_regist, device=device) + idx.max() + 1) % self.config.vocab_size
             register_tokens = register_tokens.unsqueeze(0).expand(b, -1)
             idx = torch.cat((register_tokens, idx), dim=1)
 
@@ -296,11 +296,24 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            if self.n_regist > 0:
-                logits = self.lm_head(x[:, self.n_regist:])
-            else:
-                logits = self.lm_head(x)
+            logits = self.lm_head(x[:, self.n_regist:])
+            
+            # Check for NaNs in logits and targets
+            if torch.isnan(logits).any():
+                print("NaNs found in logits")
+            if torch.isnan(targets).any():
+                print("NaNs found in targets")
+
+            # Check target values
+            if targets.min() < 0 or targets.max() >= logits.size(-1):
+                print(f"Invalid target values: min {targets.min()}, max {targets.max()}, num_classes {logits.size(-1)}")
+                raise ValueError("Invalid target values")
+
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            
+            # Check for NaNs in loss
+            if torch.isnan(loss).any():
+                print("NaNs found in loss")
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
