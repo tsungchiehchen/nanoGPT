@@ -204,6 +204,7 @@ class GPTConfig:
     query_dim: int = 64 # Question 2
     wind: int = None # Question 3
     threeLayer: bool = False # Question 4
+    n_regist: int = 0 # Question 5
     abs: bool = False # Question 7
 
 class GPT(nn.Module):
@@ -213,14 +214,24 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        self.n_regist = config.n_regist
 
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
-        ))
+        if self.n_regist > 0:
+            self.transformer = nn.ModuleDict(dict(
+                wte = nn.Embedding(config.vocab_size + self.n_regist, config.n_embd),
+                wpe = nn.Embedding(config.block_size + self.n_regist, config.n_embd),
+                drop = nn.Dropout(config.dropout),
+                h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ))
+        else:
+            self.transformer = nn.ModuleDict(dict(
+                wte = nn.Embedding(config.vocab_size, config.n_embd),
+                wpe = nn.Embedding(config.block_size, config.n_embd),
+                drop = nn.Dropout(config.dropout),
+                h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -262,11 +273,22 @@ class GPT(nn.Module):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        if self.n_regist > 0:
+            register_tokens = torch.arange(self.n_regist, device=device) + idx.max() + 1
+            register_tokens = register_tokens.unsqueeze(0).expand(b, -1)
+            idx = torch.cat((register_tokens, idx), dim=1)
+
+            # forward the GPT model itself
+            tok_emb = self.transformer.wte(idx)  # each index maps to a (learnable) vector
+            pos_emb = self.transformer.wpe(torch.arange(idx.size(1), device=device)) # each position maps to a (learnable) vector        
+        else:
+            pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+
+            # forward the GPT model itself
+            tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+            pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
@@ -274,7 +296,10 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            if self.n_regist > 0:
+                logits = self.lm_head(x[:, self.n_regist:])
+            else:
+                logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position

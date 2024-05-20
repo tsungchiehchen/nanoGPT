@@ -58,6 +58,7 @@ key_dim = 64 # Question 2
 query_dim = 64 # Question 2
 wind = 256 # Question 3
 threeLayer = False # Question 4
+n_regist = 0 # Question 5
 abs = False # Question 7
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
@@ -150,7 +151,7 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout, key_dim=key_dim, query_dim=query_dim, wind=wind, threeLayer=threeLayer, abs=abs) # start with model_args from command line   # Question 2, 3, 4, 7
+                  bias=bias, vocab_size=None, dropout=dropout, key_dim=key_dim, query_dim=query_dim, wind=wind, threeLayer=threeLayer, n_regist=n_regist, abs=abs) # start with model_args from command line   # Question 2, 3, 4, 5, 7
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
