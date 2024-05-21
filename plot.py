@@ -119,7 +119,7 @@ plt.savefig('q6_val_loss.png')
 # plt.show()
 
 # Question 7
-q7_abs_val_loss = "tensor(4.2823), tensor(2.0662), tensor(1.7465), tensor(1.5872), tensor(1.5183), tensor(1.5000), tensor(1.4812), tensor(1.4642), tensor(1.4828), tensor(1.4814), tensor(1.5012), tensor(1.5162), tensor(1.5282), tensor(1.5550), tensor(1.5793), tensor(1.6055), tensor(1.6272), tensor(1.6485), tensor(1.6708), tensor(1.6798), tensor(1.7013)"
+q7_abs_val_loss = "tensor(4.2818), tensor(2.3043), tensor(2.0343), tensor(1.8271), tensor(1.7148), tensor(1.6609), tensor(1.6005), tensor(1.5661), tensor(1.5480), tensor(1.5283), tensor(1.5238), tensor(1.5202), tensor(1.5157), tensor(1.5273), tensor(1.5332), tensor(1.5498), tensor(1.5556), tensor(1.5693), tensor(1.5782), tensor(1.5882), tensor(1.5960)"
 
 q7_abs_val_loss = clean_loss(q7_abs_val_loss)
 
